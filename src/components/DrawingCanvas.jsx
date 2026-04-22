@@ -1,160 +1,284 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useAuth } from '../hooks/useAuth';
+import React, { useEffect, useRef, useState } from "react";
 
 const DrawingCanvas = ({ socket, roomId, color, strokeWidth, tool, canvasRef }) => {
-const ctxRef = useRef();
-const [drawing, setDrawing] = useState(false);
+  const ctxRef = useRef();
+  const [drawing, setDrawing] = useState(false);
 
-const colorRef = useRef(color);
-const widthRef = useRef(strokeWidth);
+  const pathsRef = useRef({});
+  const shapeRef = useRef(null);
+  const shapesRef = useRef([]);
 
-const { user } = useAuth();
+  // =========================
+  // SETUP CANVAS
+  // =========================
+  useEffect(() => {
+    const canvas = canvasRef.current;
 
-// keep latest color & width
-useEffect(() => {
-colorRef.current = color;
-widthRef.current = strokeWidth;
-}, [color, strokeWidth]);
+    const resize = () => {
+      const { width, height } = canvas.parentElement.getBoundingClientRect();
+      canvas.width = width;
+      canvas.height = height;
 
-// setup canvas
-useEffect(() => {
-const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d");
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
 
+      ctxRef.current = ctx;
 
-const resizeCanvas = () => {
-  const { width, height } = canvas.parentElement.getBoundingClientRect();
-  canvas.width = width;
-  canvas.height = height;
+      redrawAll();
+    };
 
-  const ctx = canvas.getContext('2d');
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+    resize();
+    window.addEventListener("resize", resize);
 
-  ctxRef.current = ctx;
-};
+    return () => window.removeEventListener("resize", resize);
+  }, [canvasRef]);
 
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
+  // =========================
+  // DRAW SHAPE
+  // =========================
+  const drawShape = (shape) => {
+    const ctx = ctxRef.current;
+    if (!ctx) return;
 
-return () => {
-  window.removeEventListener('resize', resizeCanvas);
-};
+    ctx.strokeStyle = shape.color;
+    ctx.lineWidth = shape.strokeWidth;
 
+    if (shape.type === "line") {
+      ctx.beginPath();
+      ctx.moveTo(shape.startX, shape.startY);
+      ctx.lineTo(shape.endX, shape.endY);
+      ctx.stroke();
+    }
 
-}, [canvasRef]);
+    if (shape.type === "rectangle") {
+      ctx.strokeRect(
+        shape.startX,
+        shape.startY,
+        shape.endX - shape.startX,
+        shape.endY - shape.startY
+      );
+    }
 
-// start drawing
-const startDrawing = ({ nativeEvent }) => {
-if (!socket?.connected) return;
+    if (shape.type === "circle") {
+      const r = Math.sqrt(
+        (shape.endX - shape.startX) ** 2 +
+        (shape.endY - shape.startY) ** 2
+      );
 
+      ctx.beginPath();
+      ctx.arc(shape.startX, shape.startY, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
-const { offsetX, offsetY } = nativeEvent;
-const ctx = ctxRef.current;
+    if (shape.type === "text") {
+      ctx.fillStyle = shape.color;
+      ctx.font = `${shape.fontSize}px sans-serif`;
+      ctx.fillText(shape.text, shape.x, shape.y);
+    }
+  };
 
-ctx.beginPath();
-ctx.moveTo(offsetX, offsetY);
-ctx.strokeStyle = tool === 'eraser' ? '#ffffff' : colorRef.current;
-ctx.lineWidth = widthRef.current;
+  // =========================
+  // REDRAW ALL
+  // =========================
+  const redrawAll = () => {
+    const ctx = ctxRef.current;
+    const canvas = canvasRef.current;
+    if (!ctx) return;
 
-setDrawing(true);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-socket.emit('draw-start', {
-  roomId,
-  offsetX,
-  offsetY,
-  color: ctx.strokeStyle,
-  strokeWidth: widthRef.current,
-  username: user?.username || 'Anonymous',
-});
+    shapesRef.current.forEach(drawShape);
+  };
 
+  // =========================
+  // START
+  // =========================
+  const startDrawing = ({ nativeEvent }) => {
+    if (!socket || !socket.connected) return;
 
-};
+    const { offsetX, offsetY } = nativeEvent;
 
-// drawing move
-const draw = ({ nativeEvent }) => {
-if (!drawing || !socket?.connected) return;
+    if (tool === "pencil" || tool === "eraser") {
+      pathsRef.current[socket.id] = { x: offsetX, y: offsetY };
 
+      socket.emit("draw-start", {
+        roomId,
+        offsetX,
+        offsetY,
+        color: tool === "eraser" ? "#ffffff" : color,
+        strokeWidth,
+      });
+    }
 
-const { offsetX, offsetY } = nativeEvent;
-const ctx = ctxRef.current;
+    if (["line", "rectangle", "circle"].includes(tool)) {
+      shapeRef.current = {
+        type: tool,
+        startX: offsetX,
+        startY: offsetY,
+        endX: offsetX,
+        endY: offsetY,
+        color,
+        strokeWidth,
+        roomId,
+      };
+    }
 
-ctx.lineTo(offsetX, offsetY);
-ctx.stroke();
+    if (tool === "text") {
+      const text = prompt("Enter text");
+      if (!text) return;
 
-socket.emit('draw-move', { roomId, offsetX, offsetY });
+      const shape = {
+        type: "text",
+        text,
+        x: offsetX,
+        y: offsetY,
+        color,
+        fontSize: 20,
+        roomId,
+      };
 
+      shapesRef.current.push(shape);
+      drawShape(shape);
 
-};
+      socket.emit("draw-shape", shape);
+      return;
+    }
 
-// end drawing
-const endDrawing = () => {
-if (!drawing || !socket?.connected) return;
+    setDrawing(true);
+  };
 
+  // =========================
+  // MOVE
+  // =========================
+  const draw = ({ nativeEvent }) => {
+    if (!drawing) return;
 
-ctxRef.current.closePath();
-setDrawing(false);
+    const { offsetX, offsetY } = nativeEvent;
+    const ctx = ctxRef.current;
 
-socket.emit('draw-end', {
-  roomId,
-  username: user?.username || 'Anonymous',
-});
+    if (tool === "pencil" || tool === "eraser") {
+      const prev = pathsRef.current[socket.id];
+      if (!prev) return;
 
+      ctx.beginPath();
+      ctx.moveTo(prev.x, prev.y);
+      ctx.lineTo(offsetX, offsetY);
+      ctx.strokeStyle = tool === "eraser" ? "#ffffff" : color;
+      ctx.lineWidth = strokeWidth;
+      ctx.stroke();
 
-};
+      pathsRef.current[socket.id] = { x: offsetX, y: offsetY };
 
-// listen to other users
-useEffect(() => {
-if (!socket || !roomId) return;
+      socket.emit("draw-move", { roomId, offsetX, offsetY });
+    }
 
+    if (shapeRef.current) {
+      shapeRef.current.endX = offsetX;
+      shapeRef.current.endY = offsetY;
 
-const handleDrawStart = ({ offsetX, offsetY, color, strokeWidth }) => {
-  const ctx = ctxRef.current;
-  ctx.beginPath();
-  ctx.moveTo(offsetX, offsetY);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = strokeWidth;
-};
+      redrawAll();
+      drawShape(shapeRef.current);
+    }
+  };
 
-const handleDrawMove = ({ offsetX, offsetY }) => {
-  const ctx = ctxRef.current;
-  ctx.lineTo(offsetX, offsetY);
-  ctx.stroke();
-};
+  // =========================
+  // END
+  // =========================
+  const endDrawing = () => {
+    if (!drawing) return;
 
-const handleDrawEnd = () => {
-  ctxRef.current.closePath();
-};
+    if (shapeRef.current) {
+      const shape = { ...shapeRef.current };
 
-const handleClearCanvas = () => {
-  const canvas = canvasRef.current;
-  ctxRef.current.clearRect(0, 0, canvas.width, canvas.height);
-};
+      shapesRef.current.push(shape);
+      drawShape(shape);
+      console.log(shape);
+      
+      socket.emit("draw-shape", shape);
 
-socket.on('draw-start', handleDrawStart);
-socket.on('draw-move', handleDrawMove);
-socket.on('draw-end', handleDrawEnd);
-socket.on('clear-canvas', handleClearCanvas);
+      shapeRef.current = null;
+    }
 
-return () => {
-  socket.off('draw-start', handleDrawStart);
-  socket.off('draw-move', handleDrawMove);
-  socket.off('draw-end', handleDrawEnd);
-  socket.off('clear-canvas', handleClearCanvas);
-};
+    socket.emit("draw-end", { roomId });
+    setDrawing(false);
+  };
 
+  // =========================
+  // SOCKET LISTENERS
+  // =========================
+  useEffect(() => {
+    if (!socket) return;
 
-}, [socket, roomId, canvasRef]);
+    const handleStart = ({ userId, offsetX, offsetY, color, strokeWidth }) => {
+      pathsRef.current[userId] = { x: offsetX, y: offsetY };
 
-return (
-<canvas
-ref={canvasRef} // ✅ SAME REF FROM PARENT
-onMouseDown={startDrawing}
-onMouseMove={draw}
-onMouseUp={endDrawing}
-onMouseLeave={endDrawing}
-className="absolute inset-0 z-0"
-/>
-);
+      ctxRef.current.strokeStyle = color;
+      ctxRef.current.lineWidth = strokeWidth;
+    };
+
+    const handleMove = ({ userId, offsetX, offsetY }) => {
+      const prev = pathsRef.current[userId];
+      if (!prev) return;
+
+      const ctx = ctxRef.current;
+
+      ctx.beginPath();
+      ctx.moveTo(prev.x, prev.y);
+      ctx.lineTo(offsetX, offsetY);
+      ctx.stroke();
+
+      pathsRef.current[userId] = { x: offsetX, y: offsetY };
+    };
+
+    const handleEnd = ({ userId }) => {
+      delete pathsRef.current[userId];
+    };
+
+    const handleShape = (shape) => {
+      console.log("RECEIVED SHAPE:", shape); // 🔥 DEBUG
+
+      shapesRef.current.push(shape);
+      drawShape(shape);
+    };
+
+    const handleClear = () => {
+      shapesRef.current = [];
+      pathsRef.current = {};
+
+      ctxRef.current.clearRect(
+        0,
+        0,
+        canvasRef.current.width,
+        canvasRef.current.height
+      );
+    };
+
+    socket.on("draw-start", handleStart);
+    socket.on("draw-move", handleMove);
+    socket.on("draw-end", handleEnd);
+    socket.on("draw-shape", handleShape);
+    socket.on("clear-canvas", handleClear);
+
+    return () => {
+      socket.off("draw-start", handleStart);
+      socket.off("draw-move", handleMove);
+      socket.off("draw-end", handleEnd);
+      socket.off("draw-shape", handleShape);
+      socket.off("clear-canvas", handleClear);
+    };
+  }, [socket]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      onMouseDown={startDrawing}
+      onMouseMove={draw}
+      onMouseUp={endDrawing}
+      onMouseLeave={endDrawing}
+      className="absolute inset-0"
+    />
+  );
 };
 
 export default DrawingCanvas;

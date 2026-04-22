@@ -1,6 +1,6 @@
 import { io } from 'socket.io-client';
 
-let socket;
+let socket = null;
 
 export const getSocket = () => {
   if (!socket) {
